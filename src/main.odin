@@ -19,6 +19,8 @@ Vec2 :: distinct [2]f32
 Vec3 :: distinct [3]f32
 Vec4 :: distinct [4]f32
 
+SUPPORTED_SHADER_FORMATS :: sdl.GPUShaderFormat{.DXIL, .MSL, .SPIRV}
+
 Vertex :: struct {
 	position: Vec3,
 	color:    Vec4,
@@ -60,21 +62,16 @@ create_orthographic_offcenter :: proc(
 
 LoadImageError :: enum {
 	FileNotFound,
-	InvalidFile,
 }
 
 load_image :: proc(filename: string) -> (^sdl.Surface, LoadImageError) {
-	cstr_filename := strings.clone_to_cstring(filename, context.temp_allocator)
+	full_path := fmt.tprintf("%s/%s", IMAGES_PATH, filename)
+	cstr_filename := strings.clone_to_cstring(full_path, context.temp_allocator)
 	defer delete(cstr_filename, context.temp_allocator)
 
 	surface := img.Load(cstr_filename)
 	if surface == nil {
-		// Check if file exists first
-		if !os.exists(filename) {
-			return nil, .FileNotFound
-		}
-		// If file exists but failed to load, it's either invalid or unsupported format
-		return nil, .InvalidFile
+		return nil, .FileNotFound
 	}
 
 	return surface, nil
@@ -108,16 +105,16 @@ load_shader :: proc(
 	extension: string
 	entrypoint: string = "main"
 
-	if .SPIRV in shader_formats {
-		format = {.SPIRV}
-		extension = ".spv"
-	} else if .DXIL in shader_formats {
+	if .DXIL in shader_formats {
 		format = {.DXIL}
 		extension = ".dxil"
 	} else if .MSL in shader_formats {
 		format = {.MSL}
 		extension = ".msl"
 		entrypoint = "main0"
+	} else if .SPIRV in shader_formats {
+		format = {.SPIRV}
+		extension = ".spv"
 	} else {
 		sdl.Log(
 			"Unrecognized shader format for file: %s",
@@ -374,7 +371,7 @@ create_texture_and_sampler :: proc(
 	sdl.EndGPUCopyPass(copy_pass)
 	_ = sdl.SubmitGPUCommandBuffer(upload_cmd_buf)
 
-	return {texture = texture, sampler = sampler}, .FailedToAcquireCommandBuffer
+	return {texture = texture, sampler = sampler}, nil
 }
 
 SpriteBuffers :: struct {
@@ -536,6 +533,8 @@ render :: proc(game: ^Game) {
 main :: proc() {
 	game := Game{}
 	defer game_deinit(&game)
+	game.running = true
+	game.paused = false
 
 	if !sdl.Init(sdl.INIT_VIDEO) {
 		sdl.Log("Failed to initialize SDL video subsystem")
@@ -555,7 +554,15 @@ main :: proc() {
 		return
 	}
 
-	game.device = sdl.CreateGPUDevice(sdl.GPUShaderFormat{.SPIRV, .DXIL, .MSL}, true, nil)
+	driver_count := sdl.GetNumGPUDrivers()
+	for i in 0 ..< driver_count {
+		driver_name := sdl.GetGPUDriver(i)
+		if driver_name == "direct3d12" {
+			sdl.SetHint(sdl.HINT_GPU_DRIVER, "direct3d12")
+		}
+	}
+
+	game.device = sdl.CreateGPUDevice(SUPPORTED_SHADER_FORMATS, true, nil)
 	if game.device == nil {
 		sdl.Log("Failed to create GPU device: %s", sdl.GetError())
 		return
@@ -578,13 +585,13 @@ main :: proc() {
 
 	game.render_pipeline = create_graphics_pipeline(game.device, game.window)
 	if game.render_pipeline == nil {
-		sdl.Log("Failed to create graphics pipeline")
+		fmt.println("Failed to create graphics pipeline")
 		return
 	}
 
 	texture_result, texture_error := create_texture_and_sampler(game.device)
 	if texture_error != nil {
-		sdl.Log("Failed to create texture and sampler")
+		fmt.println("Failed to create texture and sampler:", texture_error)
 		return
 	}
 	game.texture = texture_result.texture
@@ -615,5 +622,6 @@ main :: proc() {
 			}
 		}
 
+		render(&game)
 	}
 }
