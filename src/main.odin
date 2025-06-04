@@ -1,3 +1,4 @@
+#+feature dynamic-literals
 package main
 
 import "core:fmt"
@@ -12,7 +13,7 @@ HEIGHT :: 480
 PI :: 3.14159265358979323846
 
 IMAGES_PATH :: "assets/images"
-SPRITE_COUNT :: 8192
+SPRITE_COUNT :: 1024
 
 Vec2 :: distinct [2]f32
 Vec3 :: distinct [3]f32
@@ -21,11 +22,46 @@ Mat4x4 :: distinct [4][4]f32
 
 SUPPORTED_SHADER_FORMATS :: sdl.GPUShaderFormat{.DXIL, .MSL, .SPIRV}
 
+SpriteId :: enum {
+	Ravioli_1,
+	Ravioli_2,
+	Ravioli_3,
+	Ravioli_4,
+}
+
+Sprite :: struct {
+	atlas_offset: Vec2,
+	sprite_size:  Vec2,
+}
+
+Transform :: struct {
+	position: Vec2,
+	scale:    Vec2,
+	rotation: f32,
+}
+
 SpriteInstance :: struct {
 	x, y, z, rotation:          f32,
 	w, h, padding_a, padding_b: f32,
 	tex_u, tex_v, tex_w, tex_h: f32,
 	r, g, b, a:                 f32,
+}
+
+SPRITE_ATLAS := map[SpriteId]Sprite {
+	.Ravioli_1 = {atlas_offset = {0.0, 0.0}, sprite_size = {0.5, 0.5}},
+	.Ravioli_2 = {atlas_offset = {0.5, 0.0}, sprite_size = {0.5, 0.5}},
+	.Ravioli_3 = {atlas_offset = {0.0, 0.5}, sprite_size = {0.5, 0.5}},
+	.Ravioli_4 = {atlas_offset = {0.5, 0.5}, sprite_size = {0.5, 0.5}},
+}
+
+get_sprite :: proc(id: SpriteId) -> Sprite {
+	return SPRITE_ATLAS[id]
+}
+
+RenderableSprite :: struct {
+	sprite_id: SpriteId,
+	transform: Transform,
+	color:     Vec4,
 }
 
 OrthographicCamera2d :: struct {
@@ -35,19 +71,16 @@ OrthographicCamera2d :: struct {
 }
 
 get_projection_matrix :: proc(camera: ^OrthographicCamera2d) -> Mat4x4 {
-    half_width := camera.dimensions.x / (2 * camera.zoom)
-    half_height := camera.dimensions.y / (2 * camera.zoom)
-    
-    left := camera.position.x - half_width
-    right := camera.position.x + half_width
-    bottom := camera.position.y + half_height
-    top := camera.position.y - half_height
-    
-    return create_orthographic_offcenter(left, right, top, bottom, 0, -1)
-}
+	half_width := camera.dimensions.x / (2 * camera.zoom)
+	half_height := camera.dimensions.y / (2 * camera.zoom)
 
-u_coords: [4]f32 = {0.0, 0.5, 0.0, 0.5}
-v_coords: [4]f32 = {0.0, 0.0, 0.5, 0.5}
+	left := camera.position.x - half_width
+	right := camera.position.x + half_width
+	bottom := camera.position.y + half_height
+	top := camera.position.y - half_height
+
+	return create_orthographic_offcenter(left, right, top, bottom, 0, -1)
+}
 
 create_orthographic_offcenter :: proc(
 	left: f32,
@@ -177,6 +210,7 @@ Game :: struct {
 	sampler:                ^sdl.GPUSampler,
 	sprite_transfer_buffer: ^sdl.GPUTransferBuffer,
 	sprite_buffer:          ^sdl.GPUBuffer,
+	sprites:                [dynamic]RenderableSprite,
 	camera:                 OrthographicCamera2d,
 	running:                bool,
 	paused:                 bool,
@@ -426,26 +460,28 @@ create_sprite_buffers :: proc(device: ^sdl.GPUDevice) -> (SpriteBuffers, SpriteB
 	return {transfer_buffer = sprite_transfer_buffer, storage_buffer = sprite_buffer}, nil
 }
 
-update_sprites :: proc(sprite_data: [^]SpriteInstance) {
-	for i in 0 ..< SPRITE_COUNT {
-		ravioli := sdl.rand(4)
+update_sprites :: proc(sprite_data: [^]SpriteInstance, renderable_sprites: []RenderableSprite) {
+	for i := 0; i < len(renderable_sprites); i += 1 {
+		renderable := renderable_sprites[i]
+		sprite := get_sprite(renderable.sprite_id)
+        
 		sprite_data[i] = SpriteInstance {
-			x         = f32(sdl.rand(WIDTH)),
-			y         = f32(sdl.rand(HEIGHT)),
+			x         = renderable.transform.position.x,
+			y         = renderable.transform.position.y,
 			z         = 0,
-			rotation  = sdl.randf() * PI * 2,
-			w         = 64.0,
-			h         = 64.0,
-			tex_u     = u_coords[ravioli],
-			tex_v     = v_coords[ravioli],
-			tex_w     = 0.5,
-			tex_h     = 0.5,
-			r         = 1.0,
-			g         = 1.0,
-			b         = 1.0,
-			a         = 1.0,
-			padding_a = 0.0,
-			padding_b = 0.0,
+			rotation  = renderable.transform.rotation,
+			w         = sprite.sprite_size.x * renderable.transform.scale.x,
+			h         = sprite.sprite_size.y * renderable.transform.scale.y,
+			tex_u     = sprite.atlas_offset.x,
+			tex_v     = sprite.atlas_offset.y,
+			tex_w     = sprite.sprite_size.x,
+			tex_h     = sprite.sprite_size.y,
+			r         = renderable.color.x,
+			g         = renderable.color.y,
+			b         = renderable.color.z,
+			a         = renderable.color.w,
+			padding_a = 0,
+			padding_b = 0,
 		}
 	}
 }
@@ -458,7 +494,7 @@ game_upload_sprite_data :: proc(game: ^Game, cmd_buf: ^sdl.GPUCommandBuffer) -> 
 	}
 
 	sprite_data_ptr: [^]SpriteInstance = cast([^]SpriteInstance)raw_ptr
-	update_sprites(sprite_data_ptr)
+	update_sprites(sprite_data_ptr, game.sprites[:])
 
 	sdl.UnmapGPUTransferBuffer(game.device, game.sprite_transfer_buffer)
 
@@ -501,9 +537,7 @@ game_render :: proc(game: ^Game) {
 
 	if swapchain_texture != nil {
 		game_upload_sprite_data(game, cmd_buf)
-
-        camera_matrix := get_projection_matrix(&game.camera)
-
+		camera_matrix := get_projection_matrix(&game.camera)
 		render_pass := sdl.BeginGPURenderPass(
 			cmd_buf,
 			&sdl.GPUColorTargetInfo {
@@ -530,7 +564,7 @@ game_render :: proc(game: ^Game) {
 			1,
 		)
 		sdl.PushGPUVertexUniformData(cmd_buf, 0, &camera_matrix, size_of(Mat4x4))
-		sdl.DrawGPUPrimitives(render_pass, SPRITE_COUNT * 6, 1, 0, 0)
+		sdl.DrawGPUPrimitives(render_pass, u32(len(game.sprites)) * 6, 1, 0, 0)
 		sdl.EndGPURenderPass(render_pass)
 	}
 
@@ -620,6 +654,21 @@ main :: proc() {
 		position   = {WIDTH / 2.0, HEIGHT / 2.0},
 		dimensions = {WIDTH, HEIGHT},
 	}
+
+    for i := 0; i < SPRITE_COUNT; i += 1 {
+        append(
+            &game.sprites,
+            RenderableSprite {
+                sprite_id = SpriteId(sdl.rand(4)),
+                transform = Transform{
+                    position = {f32(sdl.rand(WIDTH)), f32(sdl.rand(HEIGHT))}, 
+                    scale = {64, 64},
+                    rotation = 0,
+                },
+                color = {1, 1, 1, 1},
+            },
+        )
+    }
 
 	for game.running {
 		event: sdl.Event
