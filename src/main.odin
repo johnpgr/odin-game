@@ -13,19 +13,13 @@ PI :: 3.14159265358979323846
 
 IMAGES_PATH :: "assets/images"
 SPRITE_COUNT :: 8192
-Mat4x4 :: matrix[4, 4]f32
 
 Vec2 :: distinct [2]f32
 Vec3 :: distinct [3]f32
 Vec4 :: distinct [4]f32
+Mat4x4 :: distinct [4][4]f32
 
 SUPPORTED_SHADER_FORMATS :: sdl.GPUShaderFormat{.DXIL, .MSL, .SPIRV}
-
-Vertex :: struct {
-	position: Vec3,
-	color:    Vec4,
-	uv:       Vec2,
-}
 
 SpriteInstance :: struct {
 	x, y, z, rotation:          f32,
@@ -38,25 +32,23 @@ u_coords: [4]f32 = {0.0, 0.5, 0.0, 0.5}
 v_coords: [4]f32 = {0.0, 0.0, 0.5, 0.5}
 
 create_orthographic_offcenter :: proc(
-	left, right, bottom, top, near_plane, far_plane: f32,
+	left: f32,
+	right: f32,
+	bottom: f32,
+	top: f32,
+	z_near_plane: f32,
+	z_far_plane: f32,
 ) -> Mat4x4 {
 	return Mat4x4 {
-		2.0 / (right - left),
-		0.0,
-		0.0,
-		0.0,
-		0.0,
-		2.0 / (top - bottom),
-		0.0,
-		0.0,
-		0.0,
-		0.0,
-		1.0 / (near_plane - far_plane),
-		0.0,
-		(left + right) / (left - right),
-		(top + bottom) / (bottom - top),
-		near_plane / (near_plane - far_plane),
-		1.0,
+		{2 / (right - left), 0, 0, 0},
+		{0, 2 / (top - bottom), 0, 0},
+		{0, 0, 1.0 / (z_near_plane - z_far_plane), 0},
+		{
+			(left + right) / (left - right),
+			(top + bottom) / (bottom - top),
+			z_near_plane / (z_near_plane - z_far_plane),
+			1,
+		},
 	}
 }
 
@@ -303,7 +295,7 @@ create_texture_and_sampler :: proc(
 		return {}, .FailedToCreateTexture
 	}
 
-	_ = sdl.memcpy(texture_transfer_ptr, image_data.pixels, uint(image_data.pitch * image_data.h))
+	_ = sdl.memcpy(texture_transfer_ptr, image_data.pixels, uint(image_data.w * image_data.h * 4))
 	sdl.UnmapGPUTransferBuffer(device, texture_transfer_buffer)
 
 	texture := sdl.CreateGPUTexture(
@@ -416,7 +408,7 @@ create_sprite_buffers :: proc(device: ^sdl.GPUDevice) -> (SpriteBuffers, SpriteB
 }
 
 update_sprites :: proc(sprite_data: [^]SpriteInstance) {
-	for i in 0 ..= SPRITE_COUNT {
+	for i in 0 ..< SPRITE_COUNT {
 		ravioli := sdl.rand(4)
 		sprite_data[i] = SpriteInstance {
 			x         = f32(sdl.rand(WIDTH)),
@@ -439,7 +431,7 @@ update_sprites :: proc(sprite_data: [^]SpriteInstance) {
 	}
 }
 
-upload_sprite_data :: proc(game: ^Game, cmd_buf: ^sdl.GPUCommandBuffer) -> bool {
+game_upload_sprite_data :: proc(game: ^Game, cmd_buf: ^sdl.GPUCommandBuffer) -> bool {
 	raw_ptr := sdl.MapGPUTransferBuffer(game.device, game.sprite_transfer_buffer, true)
 	if raw_ptr == nil {
 		sdl.Log("Failed to map sprite transfer buffer for upload")
@@ -473,10 +465,8 @@ upload_sprite_data :: proc(game: ^Game, cmd_buf: ^sdl.GPUCommandBuffer) -> bool 
 }
 
 
-render :: proc(game: ^Game) {
-	if game.paused {
-		return
-	}
+game_render :: proc(game: ^Game) {
+	if game.paused {return}
 
 	camera_matrix := create_orthographic_offcenter(0, WIDTH, HEIGHT, 0, 0, -1)
 
@@ -485,19 +475,20 @@ render :: proc(game: ^Game) {
 		sdl.Log("Failed to acquire GPU command buffer for rendering")
 		return
 	}
-	swapchain_tex: ^sdl.GPUTexture
-	if !sdl.WaitAndAcquireGPUSwapchainTexture(cmd_buf, game.window, &swapchain_tex, nil, nil) {
+
+	swapchain_texture: ^sdl.GPUTexture = nil
+	if !sdl.WaitAndAcquireGPUSwapchainTexture(cmd_buf, game.window, &swapchain_texture, nil, nil) {
 		sdl.Log("Failed to acquire swapchain texture for rendering")
 		return
 	}
 
-	if swapchain_tex != nil {
-		upload_sprite_data(game, cmd_buf)
+	if swapchain_texture != nil {
+		game_upload_sprite_data(game, cmd_buf)
 
 		render_pass := sdl.BeginGPURenderPass(
 			cmd_buf,
 			&sdl.GPUColorTargetInfo {
-				texture = swapchain_tex,
+				texture = swapchain_texture,
 				cycle = false,
 				load_op = .CLEAR,
 				store_op = .STORE,
@@ -510,7 +501,6 @@ render :: proc(game: ^Game) {
 			sdl.Log("Failed to begin GPU render pass")
 			return
 		}
-		defer sdl.EndGPURenderPass(render_pass)
 
 		sdl.BindGPUGraphicsPipeline(render_pass, game.render_pipeline)
 		sdl.BindGPUVertexStorageBuffers(render_pass, 0, &game.sprite_buffer, 1)
@@ -522,6 +512,7 @@ render :: proc(game: ^Game) {
 		)
 		sdl.PushGPUVertexUniformData(cmd_buf, 0, &camera_matrix, size_of(Mat4x4))
 		sdl.DrawGPUPrimitives(render_pass, SPRITE_COUNT * 6, 1, 0, 0)
+		sdl.EndGPURenderPass(render_pass)
 	}
 
 	if !sdl.SubmitGPUCommandBuffer(cmd_buf) {
@@ -621,7 +612,6 @@ main :: proc() {
 				}
 			}
 		}
-
-		render(&game)
+		game_render(&game)
 	}
 }
