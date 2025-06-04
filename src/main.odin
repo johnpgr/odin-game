@@ -51,7 +51,7 @@ create_sprite_batch :: proc(texture: ^sdl.GPUTexture, initial_capacity: int) -> 
 	}
 }
 
-add_sprite_to_layer :: proc(game: ^Game, sprite: ^RenderableSprite, z_index: int) {
+insert_sprite_in_layer :: proc(game: ^Game, sprite: ^RenderableSprite, z_index: int) {
 	layer := &game.layers[z_index]
 
 	if layer == nil {
@@ -135,72 +135,37 @@ RenderableSprite :: struct {
 }
 
 OrthographicCamera2d :: struct {
-	zoom:                f32,
-	position:            Vec2,
-	world_dimensions:    Vec2,
-	viewport_dimensions: Vec2,
-}
-
-get_projection_matrix :: proc(camera: ^OrthographicCamera2d) -> Mat4x4 {
-	aspect_ratio := camera.viewport_dimensions.x / camera.viewport_dimensions.y
-	world_aspect_ratio := camera.world_dimensions.x / camera.world_dimensions.y
-
-	effective_zoom := camera.zoom
-	if world_aspect_ratio > aspect_ratio {
-		effective_zoom /= camera.viewport_dimensions.x / camera.world_dimensions.x
-	} else {
-		effective_zoom /= camera.viewport_dimensions.y / camera.world_dimensions.y
-	}
-
-	half_width := camera.world_dimensions.x / (2 * effective_zoom)
-	half_height := camera.world_dimensions.y / (2 * effective_zoom)
-
-	left := camera.position.x - half_width
-	right := camera.position.x + half_width
-	bottom := camera.position.y + half_height
-	top := camera.position.y - half_height
-
-	return create_orthographic_offcenter(left, right, top, bottom, 0, -1)
+	zoom:       f32,
+	dimensions: Vec2,
+	position:   Vec2,
 }
 
 screen_to_world :: proc(camera: ^OrthographicCamera2d, screen_pos: Vec2) -> Vec2 {
-	aspect_ratio := camera.viewport_dimensions.x / camera.viewport_dimensions.y
-	world_aspect_ratio := camera.world_dimensions.x / camera.world_dimensions.y
+	aspect_ratio := screen_pos.x / screen_pos.y
+	world_aspect_ratio := camera.dimensions.x / camera.dimensions.y
 
 	effective_zoom := camera.zoom
 	if world_aspect_ratio > aspect_ratio {
-		effective_zoom *= camera.viewport_dimensions.x / camera.world_dimensions.x
+		effective_zoom *= screen_pos.x / camera.dimensions.x
 	} else {
-		effective_zoom *= camera.viewport_dimensions.y / camera.world_dimensions.y
+		effective_zoom *= screen_pos.y / camera.dimensions.y
 	}
 
-	ndc_x := (2 * screen_pos.x / camera.viewport_dimensions.x) - 1
-	ndc_y := 1 - (2 * screen_pos.y / camera.viewport_dimensions.y)
+	ndc_x := (2 * screen_pos.x / screen_pos.x) - 1
+	ndc_y := 1 - (2 * screen_pos.y / screen_pos.y)
 
-	world_x := camera.position.x + (ndc_x * camera.world_dimensions.x) / (2 * effective_zoom)
-	world_y := camera.position.y + (ndc_y * camera.world_dimensions.y) / (2 * effective_zoom)
+	world_x := camera.position.x + (ndc_x * camera.dimensions.x) / (2 * effective_zoom)
+	world_y := camera.position.y + (ndc_y * camera.dimensions.y) / (2 * effective_zoom)
 
 	return Vec2{world_x, world_y}
 }
 
-create_orthographic_offcenter :: proc(
-	left: f32,
-	right: f32,
-	bottom: f32,
-	top: f32,
-	z_near_plane: f32,
-	z_far_plane: f32,
-) -> Mat4x4 {
+create_orthographic_offcenter :: proc(left: f32, right: f32, top: f32, bottom: f32) -> Mat4x4 {
 	return Mat4x4 {
 		{2 / (right - left), 0, 0, 0},
 		{0, 2 / (top - bottom), 0, 0},
-		{0, 0, 1 / (z_near_plane - z_far_plane), 0},
-		{
-			(left + right) / (left - right),
-			(top + bottom) / (bottom - top),
-			z_near_plane / (z_near_plane - z_far_plane),
-			1,
-		},
+		{0, 0, 1 / (1 - 0), 0},
+		{-(right + left) / (right - left), (top + bottom) / (top - bottom), 0, 1},
 	}
 }
 
@@ -710,7 +675,7 @@ game_render :: proc(game: ^Game) {
 				cycle = false,
 				load_op = .CLEAR,
 				store_op = .STORE,
-				clear_color = {255 / 255, 102 / 255, 255 / 255, 255 / 255},
+				clear_color = {200.0 / 255.0, 33.0 / 255.0, 200.0 / 255.0, 1.0},
 			},
 			1,
 			nil,
@@ -723,7 +688,13 @@ game_render :: proc(game: ^Game) {
 		sdl.BindGPUGraphicsPipeline(render_pass, game.render_pipeline)
 		sdl.BindGPUVertexStorageBuffers(render_pass, 0, &game.sprite_buffer, 1)
 
-		camera_matrix := get_projection_matrix(&game.camera)
+		camera_matrix := create_orthographic_offcenter(
+			game.camera.position.x - game.camera.dimensions.x / 2,
+			game.camera.position.x + game.camera.dimensions.x / 2,
+			game.camera.position.y - game.camera.dimensions.y / 2,
+			game.camera.position.y + game.camera.dimensions.y / 2,
+		)
+
 		sdl.PushGPUVertexUniformData(cmd_buf, 0, &camera_matrix, size_of(Mat4x4))
 
 		layer_indices := make([dynamic]int)
@@ -767,16 +738,28 @@ game_init_random_sprites :: proc(game: ^Game) {
 			},
 			color = {1, 1, 1, 1},
 		}
-		add_sprite_to_layer(game, &sprite, z_index)
+		insert_sprite_in_layer(game, &sprite, z_index)
 	}
 }
 
-handle_window_resize :: proc(game: ^Game, new_width: i32, new_height: i32) {
-    game.window_width = int(new_width)
-    game.window_height = int(new_height)
+add_sprite :: proc(game: ^Game, id: SpriteId, pos: Vec2, layer: int) {
+    sprite := RenderableSprite{
+        sprite_id = id,
+        transform = Transform{
+            position = pos,
+            scale = {32, 32},
+            rotation = 0,
+        },
+        color = {1, 1, 1, 1},
+    }
     
-    // Update camera viewport dimensions
-    game.camera.viewport_dimensions = {f32(new_width), f32(new_height)}
+    // Adding to default layer 1, same as game_init_random_sprites
+    insert_sprite_in_layer(game, &sprite, layer)
+}
+
+handle_window_resize :: proc(game: ^Game, new_width: i32, new_height: i32) {
+	game.window_width = int(new_width)
+	game.window_height = int(new_height)
 }
 
 main :: proc() {
@@ -862,33 +845,27 @@ main :: proc() {
 	game.sprite_transfer_buffer = sprite_buffers.transfer_buffer
 	game.sprite_buffer = sprite_buffers.storage_buffer
 
-    game.window_width = INITIAL_WINDOW_WIDTH
-    game.window_height = INITIAL_WINDOW_HEIGHT
+	game.window_width = INITIAL_WINDOW_WIDTH
+	game.window_height = INITIAL_WINDOW_HEIGHT
 	game.camera = OrthographicCamera2d {
-		zoom                = 1,
-		position            = {WORLD_WIDTH / 2, WORLD_HEIGHT / 2},
-		world_dimensions    = {WORLD_WIDTH, WORLD_HEIGHT},
-		viewport_dimensions = {f32(game.window_width), f32(game.window_height)},
+		zoom       = 1,
+		position   = {160, -90},
+		dimensions = {WORLD_WIDTH, WORLD_HEIGHT},
 	}
 	game.max_sprites_per_batch = 1024
 	game.layers = make(map[int]RenderLayer)
 
 	last_reset_time := sdl.GetTicks()
-	game_init_random_sprites(&game)
+    add_sprite(&game, .Ravioli_1, {0,0}, 1)
 
 	for game.running {
 		frame_start := sdl.GetTicks()
-		if frame_start - last_reset_time >= 3000 {
-			game_clear_sprites(&game)
-			game_init_random_sprites(&game)
-			last_reset_time = sdl.GetTicks()
-		}
 
 		event: sdl.Event
 		for sdl.PollEvent(&event) {
 			#partial switch event.type {
-            case .WINDOW_RESIZED:
-                handle_window_resize(&game, event.window.data1, event.window.data2)
+			case .WINDOW_RESIZED:
+				handle_window_resize(&game, event.window.data1, event.window.data2)
 			case .QUIT:
 				game.running = false
 				break
