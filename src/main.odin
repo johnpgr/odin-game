@@ -147,9 +147,9 @@ get_projection_matrix :: proc(camera: ^OrthographicCamera2d) -> Mat4x4 {
 
 	effective_zoom := camera.zoom
 	if world_aspect_ratio > aspect_ratio {
-		effective_zoom *= camera.viewport_dimensions.x / camera.world_dimensions.x
+		effective_zoom /= camera.viewport_dimensions.x / camera.world_dimensions.x
 	} else {
-		effective_zoom *= camera.viewport_dimensions.y / camera.world_dimensions.y
+		effective_zoom /= camera.viewport_dimensions.y / camera.world_dimensions.y
 	}
 
 	half_width := camera.world_dimensions.x / (2 * effective_zoom)
@@ -431,8 +431,8 @@ create_graphics_pipeline :: proc(
 			vertex_shader = vertex_shader,
 			fragment_shader = frag_shader,
 			depth_stencil_state = sdl.GPUDepthStencilState {
-				enable_depth_test = true,
-				enable_depth_write = true,
+				enable_depth_test = false,
+				enable_depth_write = false,
 				compare_op = .LESS,
 			},
 		},
@@ -762,7 +762,7 @@ game_init_random_sprites :: proc(game: ^Game) {
 			sprite_id = SpriteId(sdl.rand(4)),
 			transform = Transform {
 				position = {f32(sdl.rand(WORLD_WIDTH)), f32(sdl.rand(WORLD_HEIGHT))},
-				scale = {2, 2},
+				scale = {32, 32},
 				rotation = 0,
 			},
 			color = {1, 1, 1, 1},
