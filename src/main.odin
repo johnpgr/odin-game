@@ -94,7 +94,7 @@ render_layer :: proc(
 			1,
 		)
 
-        sdl.DrawGPUPrimitives(render_pass, u32(len(batch.sprites)) * 6, 1, 0, 0)
+		sdl.DrawGPUPrimitives(render_pass, u32(len(batch.sprites)) * 6, 1, 0, 0)
 	}
 }
 
@@ -616,42 +616,46 @@ game_render :: proc(game: ^Game) {
 		return
 	}
 
-    for z_index, layer in game.layers {
-        for texture, batch in layer.batches {
-            if len(batch.sprites) == 0 do continue
+	for z_index, layer in game.layers {
+		for texture, batch in layer.batches {
+			if len(batch.sprites) == 0 do continue
 
-            sprite_data_ptr := sdl.MapGPUTransferBuffer(game.device, game.sprite_transfer_buffer, true)
-            if sprite_data_ptr == nil {
-                sdl.Log("Failed to map sprite transfer buffer for batch")
-                continue
-            }
+			sprite_data_ptr := sdl.MapGPUTransferBuffer(
+				game.device,
+				game.sprite_transfer_buffer,
+				true,
+			)
+			if sprite_data_ptr == nil {
+				sdl.Log("Failed to map sprite transfer buffer for batch")
+				continue
+			}
 
-            sprite_instances := cast([^]SpriteInstance)sprite_data_ptr
-            update_sprites(sprite_instances, batch.sprites[:])
-            sdl.UnmapGPUTransferBuffer(game.device, game.sprite_transfer_buffer)
+			sprite_instances := cast([^]SpriteInstance)sprite_data_ptr
+			update_sprites(sprite_instances, batch.sprites[:])
+			sdl.UnmapGPUTransferBuffer(game.device, game.sprite_transfer_buffer)
 
-            copy_pass := sdl.BeginGPUCopyPass(cmd_buf)
-            if copy_pass == nil {
-                sdl.Log("Failed to begin GPU copy pass for batch")
-                continue
-            }
+			copy_pass := sdl.BeginGPUCopyPass(cmd_buf)
+			if copy_pass == nil {
+				sdl.Log("Failed to begin GPU copy pass for batch")
+				continue
+			}
 
-            sdl.UploadToGPUBuffer(
-                copy_pass,
-                sdl.GPUTransferBufferLocation{
-                    transfer_buffer = game.sprite_transfer_buffer,
-                    offset = 0,
-                },
-                sdl.GPUBufferRegion{
-                    buffer = game.sprite_buffer,
-                    offset = 0,
-                    size = u32(len(batch.sprites)) * size_of(SpriteInstance),
-                },
-                true,
-            )
-            sdl.EndGPUCopyPass(copy_pass)
-        }
-    }
+			sdl.UploadToGPUBuffer(
+				copy_pass,
+				sdl.GPUTransferBufferLocation {
+					transfer_buffer = game.sprite_transfer_buffer,
+					offset = 0,
+				},
+				sdl.GPUBufferRegion {
+					buffer = game.sprite_buffer,
+					offset = 0,
+					size = u32(len(batch.sprites)) * size_of(SpriteInstance),
+				},
+				true,
+			)
+			sdl.EndGPUCopyPass(copy_pass)
+		}
+	}
 
 	swapchain_texture: ^sdl.GPUTexture = nil
 	if !sdl.WaitAndAcquireGPUSwapchainTexture(cmd_buf, game.window, &swapchain_texture, nil, nil) {
@@ -701,6 +705,30 @@ game_render :: proc(game: ^Game) {
 		sdl.Log("Failed to submit GPU command buffer for rendering")
 		return
 	}
+}
+
+game_clear_sprites :: proc(game: ^Game) {
+	for _, &layer in game.layers {
+		for _, &batch in layer.batches {
+            clear(&batch.sprites)
+		}
+	}
+	game.sprite_count = 0
+}
+
+game_init_random_sprites :: proc(game: ^Game) {
+    for i := 0; i < 500; i += 1 {
+        sprite := RenderableSprite {
+            sprite_id = SpriteId(sdl.rand(4)),
+            transform = Transform {
+                position = {f32(sdl.rand(WIDTH)), f32(sdl.rand(HEIGHT))},
+                scale = {64, 64},
+                rotation = 0,
+            },
+            color = {1, 1, 1, 1},
+        }
+        add_sprite_to_layer(game, sprite, int(sdl.rand(3)))
+    }
 }
 
 main :: proc() {
@@ -794,21 +822,16 @@ main :: proc() {
 	game.max_sprites_per_batch = 1024
 	game.layers = make(map[int]RenderLayer)
 
-	for i := 0; i < 500; i += 1 {
-		sprite := RenderableSprite {
-			sprite_id = SpriteId(sdl.rand(4)),
-			transform = Transform {
-				position = {f32(sdl.rand(WIDTH)), f32(sdl.rand(HEIGHT))},
-				scale = {64, 64},
-				rotation = 0,
-			},
-			color = {1, 1, 1, 1},
-		}
-		add_sprite_to_layer(&game, sprite, int(sdl.rand(3)))
-	}
+	last_reset_time := sdl.GetTicks()
+    game_init_random_sprites(&game)
 
 	for game.running {
 		frame_start := sdl.GetTicks()
+		if frame_start - last_reset_time >= 3000 {
+			game_clear_sprites(&game)
+            game_init_random_sprites(&game)
+            last_reset_time = sdl.GetTicks()
+		}
 
 		event: sdl.Event
 		for sdl.PollEvent(&event) {
