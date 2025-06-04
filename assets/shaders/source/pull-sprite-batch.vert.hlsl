@@ -47,14 +47,15 @@ Output main(uint id : SV_VertexID)
     float s = sin(sprite.Rotation);
 
     float2 coord = vertexPos[vert];
+
     coord *= sprite.Scale;
+
     float2x2 rotation = {c, s, -s, c};
     coord = mul(coord, rotation);
 
     float3 coordWithDepth = float3(coord + sprite.Position.xy, sprite.Position.z);
 
     Output output;
-
     output.Position = mul(ViewProjectionMatrix, float4(coordWithDepth, 1.0f));
     output.Texcoord = texcoord[vert];
     output.Color = sprite.Color;

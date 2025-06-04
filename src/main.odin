@@ -52,7 +52,7 @@ create_sprite_batch :: proc(texture: ^sdl.GPUTexture, initial_capacity: int) -> 
 	}
 }
 
-add_sprite_to_layer :: proc(game: ^Game, sprite: RenderableSprite, z_index: int) {
+add_sprite_to_layer :: proc(game: ^Game, sprite: ^RenderableSprite, z_index: int) {
 	layer := &game.layers[z_index]
 
 	if layer == nil {
@@ -74,7 +74,8 @@ add_sprite_to_layer :: proc(game: ^Game, sprite: RenderableSprite, z_index: int)
 		reserve(&batch.sprites, batch.capacity)
 	}
 
-	append(&batch.sprites, sprite)
+	sprite.depth = (f32(z_index) + (1.0 - sprite.transform.position.y / HEIGHT))
+	append(&batch.sprites, sprite^)
 	game.sprite_count += 1
 }
 
@@ -131,6 +132,7 @@ RenderableSprite :: struct {
 	sprite_id: SpriteId,
 	transform: Transform,
 	color:     Vec4,
+	depth:     f32,
 }
 
 OrthographicCamera2d :: struct {
@@ -396,6 +398,11 @@ create_graphics_pipeline :: proc(
 			primitive_type = .TRIANGLELIST,
 			vertex_shader = vertex_shader,
 			fragment_shader = frag_shader,
+			depth_stencil_state = sdl.GPUDepthStencilState {
+				enable_depth_test = true,
+				enable_depth_write = true,
+				compare_op = .LESS,
+			},
 		},
 	)
 	return graphics_pipeline
@@ -549,7 +556,7 @@ sprite_instance_from_renderable_sprite :: proc(renderable: RenderableSprite) -> 
 	return SpriteInstance {
 		x = renderable.transform.position.x,
 		y = renderable.transform.position.y,
-		z = 0,
+		z = renderable.depth,
 		rotation = renderable.transform.rotation,
 		w = sprite.sprite_size.x * renderable.transform.scale.x,
 		h = sprite.sprite_size.y * renderable.transform.scale.y,
@@ -710,25 +717,26 @@ game_render :: proc(game: ^Game) {
 game_clear_sprites :: proc(game: ^Game) {
 	for _, &layer in game.layers {
 		for _, &batch in layer.batches {
-            clear(&batch.sprites)
+			clear(&batch.sprites)
 		}
 	}
 	game.sprite_count = 0
 }
 
 game_init_random_sprites :: proc(game: ^Game) {
-    for i := 0; i < 500; i += 1 {
-        sprite := RenderableSprite {
-            sprite_id = SpriteId(sdl.rand(4)),
-            transform = Transform {
-                position = {f32(sdl.rand(WIDTH)), f32(sdl.rand(HEIGHT))},
-                scale = {64, 64},
-                rotation = 0,
-            },
-            color = {1, 1, 1, 1},
-        }
-        add_sprite_to_layer(game, sprite, int(sdl.rand(3)))
-    }
+	for i := 0; i < 500; i += 1 {
+		z_index := int(sdl.rand(3))
+		sprite := RenderableSprite {
+			sprite_id = SpriteId(sdl.rand(4)),
+			transform = Transform {
+				position = {f32(sdl.rand(WIDTH)), f32(sdl.rand(HEIGHT))},
+				scale = {64, 64},
+				rotation = 0,
+			},
+			color = {1, 1, 1, 1},
+		}
+		add_sprite_to_layer(game, &sprite, z_index)
+	}
 }
 
 main :: proc() {
@@ -823,14 +831,14 @@ main :: proc() {
 	game.layers = make(map[int]RenderLayer)
 
 	last_reset_time := sdl.GetTicks()
-    game_init_random_sprites(&game)
+	game_init_random_sprites(&game)
 
 	for game.running {
 		frame_start := sdl.GetTicks()
 		if frame_start - last_reset_time >= 3000 {
 			game_clear_sprites(&game)
-            game_init_random_sprites(&game)
-            last_reset_time = sdl.GetTicks()
+			game_init_random_sprites(&game)
+			last_reset_time = sdl.GetTicks()
 		}
 
 		event: sdl.Event
