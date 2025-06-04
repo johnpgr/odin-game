@@ -3,12 +3,16 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import sdl "vendor:sdl3"
 import img "vendor:sdl3/image"
 
 WIDTH :: 640
 HEIGHT :: 480
+
+TARGET_FPS :: 60
+FRAME_TIME_MS :: 1000 / TARGET_FPS
 
 PI :: 3.14159265358979323846
 
@@ -34,10 +38,69 @@ Sprite :: struct {
 	sprite_size:  Vec2,
 }
 
-Transform :: struct {
-	position: Vec2,
-	scale:    Vec2,
-	rotation: f32,
+SpriteBatch :: struct {
+	texture:  ^sdl.GPUTexture,
+	sprites:  [dynamic]RenderableSprite,
+	capacity: int,
+}
+
+create_sprite_batch :: proc(texture: ^sdl.GPUTexture, initial_capacity: int) -> SpriteBatch {
+	return SpriteBatch {
+		texture = texture,
+		sprites = make([dynamic]RenderableSprite, 0, initial_capacity),
+		capacity = initial_capacity,
+	}
+}
+
+add_sprite_to_layer :: proc(game: ^Game, sprite: RenderableSprite, z_index: int) {
+	layer := &game.layers[z_index]
+
+	if layer == nil {
+		game.layers[z_index] = RenderLayer {
+			batches = make(map[^sdl.GPUTexture]SpriteBatch),
+			z_index = z_index,
+		}
+		layer = &game.layers[z_index]
+	}
+
+	batch := &layer.batches[game.texture]
+	if batch == nil {
+		layer.batches[game.texture] = create_sprite_batch(game.texture, game.max_sprites_per_batch)
+		batch = &layer.batches[game.texture]
+	}
+
+	if len(batch.sprites) >= batch.capacity {
+		batch.capacity *= 2
+		reserve(&batch.sprites, batch.capacity)
+	}
+
+	append(&batch.sprites, sprite)
+	game.sprite_count += 1
+}
+
+render_layer :: proc(
+	game: ^Game,
+	cmd_buf: ^sdl.GPUCommandBuffer,
+	render_pass: ^sdl.GPURenderPass,
+	layer: RenderLayer,
+) {
+	for texture, batch in layer.batches {
+		if len(batch.sprites) == 0 do continue
+
+		sdl.BindGPUFragmentSamplers(
+			render_pass,
+			0,
+			&sdl.GPUTextureSamplerBinding{texture = texture, sampler = game.sampler},
+			1,
+		)
+
+        sdl.DrawGPUPrimitives(render_pass, u32(len(batch.sprites)) * 6, 1, 0, 0)
+	}
+}
+
+RenderLayer :: struct {
+	batches: map[^sdl.GPUTexture]SpriteBatch,
+	z_index: int,
 }
 
 SpriteInstance :: struct {
@@ -52,6 +115,12 @@ SPRITE_ATLAS := map[SpriteId]Sprite {
 	.Ravioli_2 = {atlas_offset = {0.5, 0.0}, sprite_size = {0.5, 0.5}},
 	.Ravioli_3 = {atlas_offset = {0.0, 0.5}, sprite_size = {0.5, 0.5}},
 	.Ravioli_4 = {atlas_offset = {0.5, 0.5}, sprite_size = {0.5, 0.5}},
+}
+
+Transform :: struct {
+	position: Vec2,
+	scale:    Vec2,
+	rotation: f32,
 }
 
 get_sprite :: proc(id: SpriteId) -> Sprite {
@@ -126,10 +195,15 @@ ShaderLoadError :: enum {
 	InvalidShaderStage,
 }
 
+LoadShaderParams :: struct {
+	num_samplers, num_uniform_buffers:         u32,
+	num_storage_buffers, num_storage_textures: u32,
+}
+
 load_shader :: proc(
 	device: ^sdl.GPUDevice,
 	shader_name: string,
-	num_samplers, num_uniform_buffers, num_storage_buffers, num_storage_textures: u32,
+	params: LoadShaderParams,
 ) -> (
 	^sdl.GPUShader,
 	ShaderLoadError,
@@ -144,19 +218,19 @@ load_shader :: proc(
 	}
 
 	shader_formats := sdl.GetGPUShaderFormats(device)
-	format := sdl.GPUShaderFormat{}
+	target_format := sdl.GPUShaderFormat{}
 	extension: string
 	entrypoint: string = "main"
 
 	if .DXIL in shader_formats {
-		format = {.DXIL}
+		target_format = {.DXIL}
 		extension = ".dxil"
 	} else if .MSL in shader_formats {
-		format = {.MSL}
+		target_format = {.MSL}
 		extension = ".msl"
 		entrypoint = "main0"
 	} else if .SPIRV in shader_formats {
-		format = {.SPIRV}
+		target_format = {.SPIRV}
 		extension = ".spv"
 	} else {
 		sdl.Log(
@@ -178,15 +252,15 @@ load_shader :: proc(
 	}
 
 	shader_info := sdl.GPUShaderCreateInfo {
-		format               = format,
+		format               = target_format,
 		stage                = stage,
 		entrypoint           = strings.clone_to_cstring(entrypoint, context.temp_allocator),
 		code                 = raw_data(code),
 		code_size            = len(code),
-		num_samplers         = num_samplers,
-		num_uniform_buffers  = num_uniform_buffers,
-		num_storage_buffers  = num_storage_buffers,
-		num_storage_textures = num_storage_textures,
+		num_samplers         = params.num_samplers,
+		num_uniform_buffers  = params.num_uniform_buffers,
+		num_storage_buffers  = params.num_storage_buffers,
+		num_storage_textures = params.num_storage_textures,
 	}
 
 	shader := sdl.CreateGPUShader(device, shader_info)
@@ -212,6 +286,9 @@ Game :: struct {
 	sprite_buffer:          ^sdl.GPUBuffer,
 	sprites:                [dynamic]RenderableSprite,
 	camera:                 OrthographicCamera2d,
+	layers:                 map[int]RenderLayer,
+	max_sprites_per_batch:  int,
+	sprite_count:           int,
 	running:                bool,
 	paused:                 bool,
 }
@@ -247,7 +324,10 @@ game_deinit :: proc(game: ^Game) {
 	sdl.Quit()
 }
 
-setup_present_mode :: proc(device: ^sdl.GPUDevice, window: ^sdl.Window) -> sdl.GPUPresentMode {
+select_optimal_present_mode :: proc(
+	device: ^sdl.GPUDevice,
+	window: ^sdl.Window,
+) -> sdl.GPUPresentMode {
 	present_mode: sdl.GPUPresentMode = .VSYNC
 	if sdl.WindowSupportsGPUPresentMode(device, window, .MAILBOX) {
 		present_mode = .MAILBOX
@@ -261,14 +341,32 @@ create_graphics_pipeline :: proc(
 	device: ^sdl.GPUDevice,
 	window: ^sdl.Window,
 ) -> ^sdl.GPUGraphicsPipeline {
-	vertex_shader, vertex_err := load_shader(device, "pull-sprite-batch.vert", 0, 1, 1, 0)
+	vertex_shader, vertex_err := load_shader(
+		device,
+		"pull-sprite-batch.vert",
+		{
+			num_samplers = 0,
+			num_uniform_buffers = 1,
+			num_storage_buffers = 1,
+			num_storage_textures = 0,
+		},
+	)
 	if vertex_err != nil {
 		sdl.Log("Failed to load vertex shader: %s", vertex_err)
 		return nil
 	}
 	defer sdl.ReleaseGPUShader(device, vertex_shader)
 
-	frag_shader, frag_err := load_shader(device, "textured-quad-color.frag", 1, 0, 0, 0)
+	frag_shader, frag_err := load_shader(
+		device,
+		"textured-quad-color.frag",
+		{
+			num_samplers = 1,
+			num_uniform_buffers = 0,
+			num_storage_buffers = 0,
+			num_storage_textures = 0,
+		},
+	)
 	if frag_err != nil {
 		sdl.Log("Failed to load fragment shader: %s", frag_err)
 		return nil
@@ -309,32 +407,22 @@ TextureAndSampler :: struct {
 }
 
 TextureAndSamplerError :: enum {
-	FailedToLoadImage,
 	FailedToCreateTexture,
 	FailedToCreateSampler,
 	FailedToAcquireCommandBuffer,
 	FailedToBeginCopyPass,
 }
 
-create_texture_and_sampler :: proc(
+create_texture_and_sampler_from_image :: proc(
 	device: ^sdl.GPUDevice,
+	image: ^sdl.Surface,
 ) -> (
 	TextureAndSampler,
 	TextureAndSamplerError,
 ) {
-	image_data, image_err := load_image("ravioli_atlas.bmp")
-	if image_err != nil {
-		sdl.Log("Failed to load image: %s", image_err)
-		return {}, .FailedToLoadImage
-	}
-	defer sdl.DestroySurface(image_data)
-
 	texture_transfer_buffer := sdl.CreateGPUTransferBuffer(
 		device,
-		sdl.GPUTransferBufferCreateInfo {
-			usage = .UPLOAD,
-			size = u32(image_data.pitch * image_data.h),
-		},
+		sdl.GPUTransferBufferCreateInfo{usage = .UPLOAD, size = u32(image.pitch * image.h)},
 	)
 	if texture_transfer_buffer == nil {
 		sdl.Log("Failed to create GPU transfer buffer for texture")
@@ -348,7 +436,7 @@ create_texture_and_sampler :: proc(
 		return {}, .FailedToCreateTexture
 	}
 
-	_ = sdl.memcpy(texture_transfer_ptr, image_data.pixels, uint(image_data.w * image_data.h * 4))
+	_ = sdl.memcpy(texture_transfer_ptr, image.pixels, uint(image.w * image.h * 4))
 	sdl.UnmapGPUTransferBuffer(device, texture_transfer_buffer)
 
 	texture := sdl.CreateGPUTexture(
@@ -356,8 +444,8 @@ create_texture_and_sampler :: proc(
 		sdl.GPUTextureCreateInfo {
 			type = .D2,
 			format = .R8G8B8A8_UNORM,
-			width = u32(image_data.w),
-			height = u32(image_data.h),
+			width = u32(image.w),
+			height = u32(image.h),
 			layer_count_or_depth = 1,
 			num_levels = 1,
 			usage = sdl.GPUTextureUsageFlags{.SAMPLER},
@@ -405,12 +493,7 @@ create_texture_and_sampler :: proc(
 	sdl.UploadToGPUTexture(
 		copy_pass,
 		sdl.GPUTextureTransferInfo{transfer_buffer = texture_transfer_buffer, offset = 0},
-		sdl.GPUTextureRegion {
-			texture = texture,
-			w = u32(image_data.w),
-			h = u32(image_data.h),
-			d = 1,
-		},
+		sdl.GPUTextureRegion{texture = texture, w = u32(image.w), h = u32(image.h), d = 1},
 		false,
 	)
 	sdl.EndGPUCopyPass(copy_pass)
@@ -460,29 +543,33 @@ create_sprite_buffers :: proc(device: ^sdl.GPUDevice) -> (SpriteBuffers, SpriteB
 	return {transfer_buffer = sprite_transfer_buffer, storage_buffer = sprite_buffer}, nil
 }
 
+sprite_instance_from_renderable_sprite :: proc(renderable: RenderableSprite) -> SpriteInstance {
+	sprite := get_sprite(renderable.sprite_id)
+
+	return SpriteInstance {
+		x = renderable.transform.position.x,
+		y = renderable.transform.position.y,
+		z = 0,
+		rotation = renderable.transform.rotation,
+		w = sprite.sprite_size.x * renderable.transform.scale.x,
+		h = sprite.sprite_size.y * renderable.transform.scale.y,
+		tex_u = sprite.atlas_offset.x,
+		tex_v = sprite.atlas_offset.y,
+		tex_w = sprite.sprite_size.x,
+		tex_h = sprite.sprite_size.y,
+		r = renderable.color.x,
+		g = renderable.color.y,
+		b = renderable.color.z,
+		a = renderable.color.w,
+		padding_a = 0,
+		padding_b = 0,
+	}
+}
+
 update_sprites :: proc(sprite_data: [^]SpriteInstance, renderable_sprites: []RenderableSprite) {
 	for i := 0; i < len(renderable_sprites); i += 1 {
 		renderable := renderable_sprites[i]
-		sprite := get_sprite(renderable.sprite_id)
-        
-		sprite_data[i] = SpriteInstance {
-			x         = renderable.transform.position.x,
-			y         = renderable.transform.position.y,
-			z         = 0,
-			rotation  = renderable.transform.rotation,
-			w         = sprite.sprite_size.x * renderable.transform.scale.x,
-			h         = sprite.sprite_size.y * renderable.transform.scale.y,
-			tex_u     = sprite.atlas_offset.x,
-			tex_v     = sprite.atlas_offset.y,
-			tex_w     = sprite.sprite_size.x,
-			tex_h     = sprite.sprite_size.y,
-			r         = renderable.color.x,
-			g         = renderable.color.y,
-			b         = renderable.color.z,
-			a         = renderable.color.w,
-			padding_a = 0,
-			padding_b = 0,
-		}
+		sprite_data[i] = sprite_instance_from_renderable_sprite(renderable)
 	}
 }
 
@@ -529,6 +616,43 @@ game_render :: proc(game: ^Game) {
 		return
 	}
 
+    for z_index, layer in game.layers {
+        for texture, batch in layer.batches {
+            if len(batch.sprites) == 0 do continue
+
+            sprite_data_ptr := sdl.MapGPUTransferBuffer(game.device, game.sprite_transfer_buffer, true)
+            if sprite_data_ptr == nil {
+                sdl.Log("Failed to map sprite transfer buffer for batch")
+                continue
+            }
+
+            sprite_instances := cast([^]SpriteInstance)sprite_data_ptr
+            update_sprites(sprite_instances, batch.sprites[:])
+            sdl.UnmapGPUTransferBuffer(game.device, game.sprite_transfer_buffer)
+
+            copy_pass := sdl.BeginGPUCopyPass(cmd_buf)
+            if copy_pass == nil {
+                sdl.Log("Failed to begin GPU copy pass for batch")
+                continue
+            }
+
+            sdl.UploadToGPUBuffer(
+                copy_pass,
+                sdl.GPUTransferBufferLocation{
+                    transfer_buffer = game.sprite_transfer_buffer,
+                    offset = 0,
+                },
+                sdl.GPUBufferRegion{
+                    buffer = game.sprite_buffer,
+                    offset = 0,
+                    size = u32(len(batch.sprites)) * size_of(SpriteInstance),
+                },
+                true,
+            )
+            sdl.EndGPUCopyPass(copy_pass)
+        }
+    }
+
 	swapchain_texture: ^sdl.GPUTexture = nil
 	if !sdl.WaitAndAcquireGPUSwapchainTexture(cmd_buf, game.window, &swapchain_texture, nil, nil) {
 		sdl.Log("Failed to acquire swapchain texture for rendering")
@@ -536,8 +660,6 @@ game_render :: proc(game: ^Game) {
 	}
 
 	if swapchain_texture != nil {
-		game_upload_sprite_data(game, cmd_buf)
-		camera_matrix := get_projection_matrix(&game.camera)
 		render_pass := sdl.BeginGPURenderPass(
 			cmd_buf,
 			&sdl.GPUColorTargetInfo {
@@ -557,14 +679,21 @@ game_render :: proc(game: ^Game) {
 
 		sdl.BindGPUGraphicsPipeline(render_pass, game.render_pipeline)
 		sdl.BindGPUVertexStorageBuffers(render_pass, 0, &game.sprite_buffer, 1)
-		sdl.BindGPUFragmentSamplers(
-			render_pass,
-			0,
-			&sdl.GPUTextureSamplerBinding{texture = game.texture, sampler = game.sampler},
-			1,
-		)
+
+		camera_matrix := get_projection_matrix(&game.camera)
 		sdl.PushGPUVertexUniformData(cmd_buf, 0, &camera_matrix, size_of(Mat4x4))
-		sdl.DrawGPUPrimitives(render_pass, u32(len(game.sprites)) * 6, 1, 0, 0)
+
+		layer_indices := make([dynamic]int)
+		defer delete(layer_indices)
+		for z_index in game.layers {
+			append(&layer_indices, z_index)
+		}
+		slice.sort(layer_indices[:])
+
+		for z_index in layer_indices {
+			render_layer(game, cmd_buf, render_pass, game.layers[z_index])
+		}
+
 		sdl.EndGPURenderPass(render_pass)
 	}
 
@@ -622,7 +751,7 @@ main :: proc() {
 		return
 	}
 
-	present_mode := setup_present_mode(game.device, game.window)
+	present_mode := select_optimal_present_mode(game.device, game.window)
 	_ = sdl.SetGPUSwapchainParameters(game.device, game.window, .SDR, present_mode)
 
 	sdl.srand(0)
@@ -633,13 +762,21 @@ main :: proc() {
 		return
 	}
 
-	texture_result, texture_error := create_texture_and_sampler(game.device)
+	image, image_err := load_image("ravioli_atlas.bmp")
+	if image_err != nil {
+		sdl.Log("Failed to load image: %s", image_err)
+		return
+	}
+
+	texture_result, texture_error := create_texture_and_sampler_from_image(game.device, image)
 	if texture_error != nil {
 		fmt.println("Failed to create texture and sampler:", texture_error)
 		return
 	}
 	game.texture = texture_result.texture
 	game.sampler = texture_result.sampler
+
+	sdl.DestroySurface(image)
 
 	sprite_buffers, sprite_buffers_err := create_sprite_buffers(game.device)
 	if sprite_buffers_err != nil {
@@ -654,23 +791,25 @@ main :: proc() {
 		position   = {WIDTH / 2.0, HEIGHT / 2.0},
 		dimensions = {WIDTH, HEIGHT},
 	}
+	game.max_sprites_per_batch = 1024
+	game.layers = make(map[int]RenderLayer)
 
-    for i := 0; i < SPRITE_COUNT; i += 1 {
-        append(
-            &game.sprites,
-            RenderableSprite {
-                sprite_id = SpriteId(sdl.rand(4)),
-                transform = Transform{
-                    position = {f32(sdl.rand(WIDTH)), f32(sdl.rand(HEIGHT))}, 
-                    scale = {64, 64},
-                    rotation = 0,
-                },
-                color = {1, 1, 1, 1},
-            },
-        )
-    }
+	for i := 0; i < 500; i += 1 {
+		sprite := RenderableSprite {
+			sprite_id = SpriteId(sdl.rand(4)),
+			transform = Transform {
+				position = {f32(sdl.rand(WIDTH)), f32(sdl.rand(HEIGHT))},
+				scale = {64, 64},
+				rotation = 0,
+			},
+			color = {1, 1, 1, 1},
+		}
+		add_sprite_to_layer(&game, sprite, int(sdl.rand(3)))
+	}
 
 	for game.running {
+		frame_start := sdl.GetTicks()
+
 		event: sdl.Event
 		for sdl.PollEvent(&event) {
 			#partial switch event.type {
@@ -687,5 +826,10 @@ main :: proc() {
 			}
 		}
 		game_render(&game)
+
+		frame_time := sdl.GetTicks() - frame_start
+		if frame_time < FRAME_TIME_MS {
+			sdl.Delay(u32(FRAME_TIME_MS - frame_time))
+		}
 	}
 }
