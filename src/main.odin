@@ -28,6 +28,24 @@ SpriteInstance :: struct {
 	r, g, b, a:                 f32,
 }
 
+OrthographicCamera2d :: struct {
+	zoom:       f32,
+	position:   Vec2,
+	dimensions: Vec2,
+}
+
+get_projection_matrix :: proc(camera: ^OrthographicCamera2d) -> Mat4x4 {
+    half_width := camera.dimensions.x / (2 * camera.zoom)
+    half_height := camera.dimensions.y / (2 * camera.zoom)
+    
+    left := camera.position.x - half_width
+    right := camera.position.x + half_width
+    bottom := camera.position.y + half_height
+    top := camera.position.y - half_height
+    
+    return create_orthographic_offcenter(left, right, top, bottom, 0, -1)
+}
+
 u_coords: [4]f32 = {0.0, 0.5, 0.0, 0.5}
 v_coords: [4]f32 = {0.0, 0.0, 0.5, 0.5}
 
@@ -42,7 +60,7 @@ create_orthographic_offcenter :: proc(
 	return Mat4x4 {
 		{2 / (right - left), 0, 0, 0},
 		{0, 2 / (top - bottom), 0, 0},
-		{0, 0, 1.0 / (z_near_plane - z_far_plane), 0},
+		{0, 0, 1 / (z_near_plane - z_far_plane), 0},
 		{
 			(left + right) / (left - right),
 			(top + bottom) / (bottom - top),
@@ -159,6 +177,7 @@ Game :: struct {
 	sampler:                ^sdl.GPUSampler,
 	sprite_transfer_buffer: ^sdl.GPUTransferBuffer,
 	sprite_buffer:          ^sdl.GPUBuffer,
+	camera:                 OrthographicCamera2d,
 	running:                bool,
 	paused:                 bool,
 }
@@ -468,8 +487,6 @@ game_upload_sprite_data :: proc(game: ^Game, cmd_buf: ^sdl.GPUCommandBuffer) -> 
 game_render :: proc(game: ^Game) {
 	if game.paused {return}
 
-	camera_matrix := create_orthographic_offcenter(0, WIDTH, HEIGHT, 0, 0, -1)
-
 	cmd_buf := sdl.AcquireGPUCommandBuffer(game.device)
 	if cmd_buf == nil {
 		sdl.Log("Failed to acquire GPU command buffer for rendering")
@@ -484,6 +501,8 @@ game_render :: proc(game: ^Game) {
 
 	if swapchain_texture != nil {
 		game_upload_sprite_data(game, cmd_buf)
+
+        camera_matrix := get_projection_matrix(&game.camera)
 
 		render_pass := sdl.BeginGPURenderPass(
 			cmd_buf,
@@ -595,6 +614,12 @@ main :: proc() {
 	}
 	game.sprite_transfer_buffer = sprite_buffers.transfer_buffer
 	game.sprite_buffer = sprite_buffers.storage_buffer
+
+	game.camera = OrthographicCamera2d {
+		zoom       = 1.0,
+		position   = {WIDTH / 2.0, HEIGHT / 2.0},
+		dimensions = {WIDTH, HEIGHT},
+	}
 
 	for game.running {
 		event: sdl.Event
