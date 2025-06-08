@@ -2,4 +2,4 @@
 
 set -e
 
-odin build src -debug -out:build/main
+odin build src -out:build/main
